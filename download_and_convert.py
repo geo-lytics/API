@@ -488,6 +488,25 @@ def format_date(date_str: str) -> str:
     except:
         return date_str
 
+def format_date_for_filename(date_str: str) -> str:
+    """
+    Format date string for use in filename (YYYY-MM-DD format)
+    """
+    if not date_str:
+        return "unknown-date"
+    
+    try:
+        # Try to parse ISO format with time (e.g., "2025-09-19T00:00:00.000Z")
+        if 'T' in date_str:
+            date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            return date_obj.strftime("%Y-%m-%d")
+        else:
+            # Try to parse simple date format
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            return date_obj.strftime("%Y-%m-%d")
+    except:
+        return "unknown-date"
+
 def format_authors(authors: List[str]) -> str:
     """
     Format author list
@@ -563,6 +582,8 @@ def generate_article_markdown(article: Dict[str, Any]) -> str:
     
     # Basic information
     md_content.append("## Basic Information")
+    if article_id:
+        md_content.append(f"- **ID**: {article_id}")
     md_content.append(f"- **Author**: {format_authors(authors)}")
     md_content.append(f"- **Last Edited**: {format_date(last_edited)}")
     md_content.append("")
@@ -597,39 +618,56 @@ def generate_article_markdown(article: Dict[str, Any]) -> str:
 def get_existing_article_ids(out_dir="md_export"):
     """
     Get list of existing article IDs from the output directory
+    Now that filenames are date-based, we need to read file contents to get IDs
     """
     existing_ids = set()
     if not os.path.exists(out_dir):
         return existing_ids
     
     for filename in os.listdir(out_dir):
-        if filename.endswith('.md') and filename != 'index.md':
-            # Extract ID from filename (format: {id}-{slug}.md)
-            if '-' in filename:
-                article_id = filename.split('-')[0]
-                existing_ids.add(article_id)
+        if filename.endswith('.md'):
+            file_path = os.path.join(out_dir, filename)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    # Look for ID line in the file
+                    for line in content.split('\n'):
+                        if line.startswith('- **ID**: '):
+                            article_id = line.replace('- **ID**: ', '').strip()
+                            existing_ids.add(article_id)
+                            break
+            except:
+                continue
     
     return existing_ids
 
 def get_existing_article_content(out_dir="md_export", article_id=""):
     """
     Get existing article content for comparison
+    Now that filenames are date-based, we need to read file contents to find by ID
     """
     if not article_id:
         return None
     
-    # Find the file with this ID
+    # Find the file with this ID by reading file contents
     if not os.path.exists(out_dir):
         return None
     
     for filename in os.listdir(out_dir):
-        if filename.endswith('.md') and filename != 'index.md' and filename.startswith(article_id[:8]):
+        if filename.endswith('.md'):
             file_path = os.path.join(out_dir, filename)
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    return f.read()
+                    content = f.read()
+                    # Look for ID line in the file
+                    for line in content.split('\n'):
+                        if line.startswith('- **ID**: '):
+                            file_article_id = line.replace('- **ID**: ', '').strip()
+                            if file_article_id == article_id:
+                                return content
+                            break
             except:
-                return None
+                continue
     
     return None
 
@@ -662,14 +700,16 @@ def convert_json_to_markdown(input_path="raw.json", out_dir="md_export"):
         for i, article in enumerate(articles, 1):
             article_id = article.get('id', '')
             safe_id = (article_id or "")[:8]
+            last_edited = article.get('last_edited_date', '')
             
             # Check if this is a new article
-            is_new = safe_id not in existing_ids if safe_id else True
+            is_new = article_id not in existing_ids if article_id else True
             
-            # Generate filename
+            # Generate filename using edit date instead of ID
             title = article.get('title', f'Article {i}')
             slug = slugify(title) or f"article-{i}"
-            filename = f"{safe_id}-{slug}.md" if safe_id else f"{slug}.md"
+            date_prefix = format_date_for_filename(last_edited)
+            filename = f"{date_prefix}-{slug}.md"
             
             # Generate article Markdown
             article_md = generate_article_markdown(article)
@@ -677,7 +717,7 @@ def convert_json_to_markdown(input_path="raw.json", out_dir="md_export"):
             # Check if content has changed for existing articles
             content_changed = True
             if not is_new:
-                existing_content = get_existing_article_content(out_dir, safe_id)
+                existing_content = get_existing_article_content(out_dir, article_id)
                 if existing_content == article_md:
                     content_changed = False
                     unchanged_articles_count += 1
@@ -712,46 +752,60 @@ def convert_json_to_markdown(input_path="raw.json", out_dir="md_export"):
             "\n"
         ]
         
-        # Generate current articles list
-        articles_section = ["## Current Articles\n"]
-        for i, article in enumerate(articles, 1):
-            article_id = article.get('id', '')
-            safe_id = (article_id or "")[:8]
-            is_new = safe_id not in existing_ids if safe_id else True
-            
-            # Generate filename
-            title = article.get('title', f'Article {i}')
-            slug = slugify(title) or f"article-{i}"
-            filename = f"{safe_id}-{slug}.md" if safe_id else f"{slug}.md"
-            
-            # Check if content changed
-            content_changed = True
-            if not is_new:
-                existing_content = get_existing_article_content(out_dir, safe_id)
-                article_md = generate_article_markdown(article)
-                if existing_content == article_md:
-                    content_changed = False
-            
-            # Add to index
-            authors = article.get('authors', [])
-            last_edited = article.get('last_edited_date', '')
-            author_line = ", ".join(authors) if authors else "Unknown author"
-            
-            if is_new:
-                status_marker = " 🆕"
-            elif content_changed:
-                status_marker = " 🔄"
-            else:
-                status_marker = ""
-            
-            articles_section.append(f"- [{title}]({filename}) — {author_line} ({format_date(last_edited)}){status_marker}\n")
-        
-        articles_section.append("\n")
-        
-        # Combine new log entry + current articles + existing history
+        # Generate log entry with only new and updated articles
         all_lines = []
         all_lines.extend(new_log_entry)
-        all_lines.extend(articles_section)
+        
+        if new_articles_count > 0 or updated_articles_count > 0:
+            if new_articles_count > 0:
+                all_lines.append("## New Articles\n")
+                for i, article in enumerate(articles, 1):
+                    article_id = article.get('id', '')
+                    safe_id = (article_id or "")[:8]
+                    last_edited = article.get('last_edited_date', '')
+                    is_new = article_id not in existing_ids if article_id else True
+                    
+                    if is_new:
+                        # Generate filename using edit date instead of ID
+                        title = article.get('title', f'Article {i}')
+                        slug = slugify(title) or f"article-{i}"
+                        date_prefix = format_date_for_filename(last_edited)
+                        filename = f"{date_prefix}-{slug}.md"
+                        
+                        # Add to log
+                        authors = article.get('authors', [])
+                        author_line = ", ".join(authors) if authors else "Unknown author"
+                        all_lines.append(f"- [{title}]({filename}) — {author_line} ({format_date(last_edited)}) 🆕\n")
+                
+                all_lines.append("\n")
+            
+            if updated_articles_count > 0:
+                all_lines.append("## Updated Articles\n")
+                for i, article in enumerate(articles, 1):
+                    article_id = article.get('id', '')
+                    safe_id = (article_id or "")[:8]
+                    last_edited = article.get('last_edited_date', '')
+                    is_new = article_id not in existing_ids if article_id else True
+                    
+                    if not is_new:
+                        # Check if content changed
+                        existing_content = get_existing_article_content(out_dir, article_id)
+                        article_md = generate_article_markdown(article)
+                        content_changed = existing_content != article_md
+                        
+                        if content_changed:
+                            # Generate filename using edit date instead of ID
+                            title = article.get('title', f'Article {i}')
+                            slug = slugify(title) or f"article-{i}"
+                            date_prefix = format_date_for_filename(last_edited)
+                            filename = f"{date_prefix}-{slug}.md"
+                            
+                            # Add to log
+                            authors = article.get('authors', [])
+                            author_line = ", ".join(authors) if authors else "Unknown author"
+                            all_lines.append(f"- [{title}]({filename}) — {author_line} ({format_date(last_edited)}) 🔄\n")
+                
+                all_lines.append("\n")
         
         # Add existing log content
         if existing_log_lines:
@@ -761,12 +815,6 @@ def convert_json_to_markdown(input_path="raw.json", out_dir="md_export"):
         with open(log_path, 'w', encoding='utf-8') as f:
             f.writelines(all_lines)
         
-        # Also save a simple index.md in md_export folder
-        index_path = os.path.join(out_dir, "index.md")
-        simple_index_lines = ["# News Articles Summary\n\n"]
-        simple_index_lines.extend(articles_section)
-        with open(index_path, 'w', encoding='utf-8') as f:
-            f.writelines(simple_index_lines)
         
         print(f"✅ Successfully processed {out_dir} directory")
         print(f"📊 Processed {len(articles)} articles")
