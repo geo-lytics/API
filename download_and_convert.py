@@ -471,15 +471,20 @@ def convert_image_to_markdown(node: dict) -> str:
 
 def format_date(date_str: str) -> str:
     """
-    Format date string
+    Format date string - only show date part, remove time details
     """
     if not date_str:
         return "Unknown date"
     
     try:
-        # Try to parse date
-        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-        return date_obj.strftime("%Y-%m-%d")
+        # Try to parse ISO format with time (e.g., "2025-09-19T00:00:00.000Z")
+        if 'T' in date_str:
+            date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            return date_obj.strftime("%Y-%m-%d")
+        else:
+            # Try to parse simple date format
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            return date_obj.strftime("%Y-%m-%d")
     except:
         return date_str
 
