@@ -1,14 +1,6 @@
-# News Article Downloader and Converter
+# API Handbook
 
-A Python script that downloads news articles from the Siemens API and converts them to clean Markdown files with automatic change detection and logging.
-
-## Features
-
-- 🔄 **Dual Batch Download**: Downloads articles in 2 batches (limit=5, offset=0 and limit=5, offset=5) to get more articles
-- 📝 **Markdown Conversion**: Converts rich text content to clean Markdown format
-- 🔍 **Change Detection**: Only processes new or updated articles
-- 📊 **Detailed Logging**: Maintains a complete log of all operations
-- 🏷️ **Smart Categorization**: Organizes articles with tags, countries, and authors
+This repository uses python to download new posts from the Geolytics API and converts them to clean Markdown files with automatic change detection and logging.
 
 ## Installation
 
@@ -38,15 +30,12 @@ A Python script that downloads news articles from the Siemens API and converts t
 ### Basic Usage
 
 ```bash
-# Download and convert articles (2 batches of 5 articles each)
+# Download and convert articles 
 python download_and_convert.py
-
-# Skip download and only convert existing raw.json
-python download_and_convert.py --skip-download
-
-# Custom batch configuration
-python download_and_convert.py --batch-size 3 --num-batches 4
 ```
+In default, it downloads the latest 10 articles, 5 at a time according to API limit. This number should cover all daily updates. 
+
+You can find all articles in the md_export folder, and the operation log in the log.md file which automatically updates newly-added or updated article headlines. Please see details below.
 
 ### Command Line Options
 
@@ -69,15 +58,14 @@ project/
 ├── README.md                  # This documentation
 ├── log.md                     # Operation log (created automatically)
 ├── raw.json                   # Downloaded API data (created automatically)
-└── md_export/                 # Output directory
-    ├── index.md              # Current articles index
+└── md_export/                 # Output directory 
     └── *.md                  # Individual article files
 ```
 
 ## Output Files
 
 ### Individual Article Files
-Each article is saved as a Markdown file with the format: `{id}-{title-slug}.md`
+Each article is saved as a Markdown file with the format: `{id}-{title}.md`
 
 **Structure:**
 ```markdown
@@ -98,9 +86,6 @@ Key points from the article...
 ## Article Content
 Full article content in Markdown format...
 ```
-
-### Index File (`md_export/index.md`)
-Simple list of all current articles with links.
 
 ### Log File (`log.md`)
 Complete operation history with timestamps and statistics.
@@ -129,6 +114,9 @@ The script uses API settings from `config.py`:
 - **Base URL**: Configured in `config.py`
 - **Endpoint**: `/v1/topics/export`
 - **Authentication**: API key in headers
+- **Query Parameters**:
+  - limit (integer, optional) — maximum number of topics to return (default and maxium: 5)
+  - offset (integer, optional) — number of topics to skip before starting to return results (default: 0)
 
 To modify the API settings, edit `config.py`:
 ```python
@@ -234,14 +222,10 @@ python download_and_convert.py --skip-download
 
 ## License
 
-This project is provided as-is for educational and personal use.
+This project is provided for **commercial use** and requires access credentials.  
+Usage is enabled via the provided **API base URL** and **API key**.  
+Unauthorized distribution or use without a valid API key is prohibited.
 
-## Support
-
-For issues or questions:
-1. Check the troubleshooting section above
-2. Review the log files for error details
-3. Verify API connectivity and permissions
 
 ---
 
