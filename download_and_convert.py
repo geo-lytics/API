@@ -19,6 +19,7 @@ import re
 import unicodedata
 import requests
 from datetime import datetime
+import html
 from typing import Dict, List, Any
 import os
 import argparse
@@ -256,6 +257,9 @@ def convert_node_to_markdown(node: dict) -> str:
         return convert_table_to_markdown(node)
     elif node_type == 'image':
         return convert_image_to_markdown(node)
+    elif node_type == 'imageResize':
+        # Treat imageResize the same as image
+        return convert_image_to_markdown(node)
     elif node_type == 'horizontalRule':
         return '---'
     else:
@@ -346,12 +350,17 @@ def convert_ordered_list_to_markdown(node: dict) -> str:
     if 'content' not in node:
         return ""
     
+    # Get the start number from attrs, default to 1
+    start_num = node.get('attrs', {}).get('start', 1)
+    
     list_items = []
-    for i, item in enumerate(node['content'], 1):
+    for i, item in enumerate(node['content']):
         if isinstance(item, dict) and item.get('type') == 'listItem':
             list_item_text = convert_list_item_to_markdown(item)
             if list_item_text.strip():
-                list_items.append(f"{i}. {list_item_text}")
+                # Use the start number plus the current index
+                item_number = start_num + i
+                list_items.append(f"{item_number}. {list_item_text}")
     
     return '\n'.join(list_items)
 
@@ -455,19 +464,129 @@ def convert_table_cell_to_markdown(cell: dict) -> str:
     
     return ' '.join(text_parts)
 
+def extract_s3_image_urls(content_obj: Any) -> List[tuple]:
+    """
+    Extract S3 image URLs and their keys from content object
+    Returns list of tuples: (original_url_with_params, extracted_key)
+    """
+    s3_urls = []
+    
+    # If content_obj is a JSON string, try to parse to dict first
+    if isinstance(content_obj, str):
+        try:
+            content_obj = json.loads(content_obj)
+        except Exception:
+            # Not JSON; no structured scan possible
+            return []
+    
+    def scan_node(node):
+        if isinstance(node, dict):
+            # Check if this is an image-like node
+            if node.get('type') in ('image', 'imageResize'):
+                src = node.get('attrs', {}).get('src', '')
+                if src and 'geolytics-hub-images.s3.eu-central-1.amazonaws.com' in src:
+                    # Extract key from S3 URL
+                    # Pattern: https://geolytics-hub-images.s3.eu-central-1.amazonaws.com/{key}?optional_params
+                    if '.amazonaws.com/' in src:
+                        key_part = src.split('.amazonaws.com/')[1]
+                        # Remove query parameters if present
+                        if '?' in key_part:
+                            key = key_part.split('?')[0]
+                        else:
+                            key = key_part
+                        s3_urls.append((src, key))
+            
+            # Recursively scan content
+            for value in node.values():
+                if isinstance(value, (list, dict)):
+                    scan_node(value)
+        elif isinstance(node, list):
+            for item in node:
+                scan_node(item)
+    
+    scan_node(content_obj)
+    return s3_urls
+
+def download_s3_image_via_lambda(key: str) -> bytes:
+    """
+    Download S3 image via AWS Lambda proxy
+    Returns image data as bytes, or None on failure
+    """
+    lambda_url = "https://segwspb2rqyl3weo5ykk4ngqde0ouypq.lambda-url.eu-central-1.on.aws/images/proxy"
+    
+    try:
+        response = requests.get(lambda_url, params={"key": key}, timeout=30)
+        
+        if response.status_code == 200:
+            content_type = response.headers.get('content-type', '')
+            if 'image' in content_type.lower():
+                return response.content
+            else:
+                print(f"Warning: Lambda returned non-image content for key {key}")
+                return None
+        else:
+            print(f"Warning: Lambda returned status {response.status_code} for key {key}")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Warning: Failed to download image for key {key}: {e}")
+        return None
+    except Exception as e:
+        print(f"Warning: Unexpected error downloading image for key {key}: {e}")
+        return None
+
+def save_image_locally(image_data: bytes, key: str, out_dir: str) -> str:
+    """
+    Save downloaded image locally with proper directory structure
+    Returns local path for markdown reference
+    """
+    # Create images directory
+    images_dir = os.path.join(out_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
+    
+    # Create subdirectory structure from key
+    key_parts = key.split('/')
+    if len(key_parts) > 1:
+        # Create subdirectories
+        subdir = os.path.join(images_dir, *key_parts[:-1])
+        os.makedirs(subdir, exist_ok=True)
+        local_path = os.path.join(subdir, key_parts[-1])
+    else:
+        # Just filename, save directly in images directory
+        local_path = os.path.join(images_dir, key)
+    
+    # Save image
+    with open(local_path, 'wb') as f:
+        f.write(image_data)
+    
+    # Return relative path for markdown
+    return os.path.relpath(local_path, out_dir).replace('\\', '/')
+
+def compute_local_image_paths(key: str, out_dir: str) -> (str, str):
+    """
+    Compute absolute and relative local paths for an image key without writing the file.
+    Returns (abs_path, rel_path_from_out_dir_with_unix_separators_and_dot_prefix)
+    """
+    images_dir = os.path.join(out_dir, "images")
+    key_parts = key.split('/')
+    if len(key_parts) > 1:
+        subdir = os.path.join(images_dir, *key_parts[:-1])
+        abs_path = os.path.join(subdir, key_parts[-1])
+    else:
+        abs_path = os.path.join(images_dir, key)
+    rel_path = os.path.relpath(abs_path, out_dir).replace('\\', '/')
+    if not rel_path.startswith(('./', '/')):
+        rel_path = f"./{rel_path}"
+    return abs_path, rel_path
+
 def convert_image_to_markdown(node: dict) -> str:
     """
     Convert image
     """
     attrs = node.get('attrs', {})
     src = attrs.get('src', '')
-    alt = attrs.get('alt', '')
-    title = attrs.get('title', '')
-    
-    if title:
-        return f"![{alt}]({src} \"{title}\")"
-    else:
-        return f"![{alt}]({src})"
+    # Intentionally omit alt/title to avoid polluting markdown output
+    return f"![]({src})"
 
 def format_date(date_str: str) -> str:
     """
@@ -553,7 +672,7 @@ def load_payload(path):
             pass
     return top
 
-def generate_article_markdown(article: Dict[str, Any]) -> str:
+def generate_article_markdown(article: Dict[str, Any], out_dir: str = "md_export") -> str:
     """
     Generate Markdown content for a single article
     """
@@ -574,6 +693,71 @@ def generate_article_markdown(article: Dict[str, Any]) -> str:
         parsed_content = parse_content(content)
     else:
         parsed_content = ""
+    
+    # Handle S3 image downloads by scanning the rendered markdown for S3 URLs
+    # This is robust regardless of rich-text node structure
+    s3_url_mapping = {}
+    if parsed_content:
+        # Unescape HTML entities so &amp; etc. do not break URL matching
+        scannable = html.unescape(parsed_content)
+
+        # Regex to find S3 URLs in markdown or raw text
+        # group(1) is the full URL; group(2) is the tail after domain (key + optional query)
+        s3_url_pattern = re.compile(
+            r'(https?://geolytics-hub-images\.s3\.eu-central-1\.amazonaws\.com/([^\s\)\]"\'<>]+))',
+            re.IGNORECASE
+        )
+
+        # Also match <img src="..."> or <img src='...'>
+        html_img_pattern = re.compile(
+            r'<img[^>]+src=["\'](https?://geolytics-hub-images\.s3\.eu-central-1\.amazonaws\.com/([^\s\)\]"\'<>]+))["\']',
+            re.IGNORECASE
+        )
+
+        matches = []
+        matches.extend(s3_url_pattern.finditer(scannable))
+        matches.extend(html_img_pattern.finditer(scannable))
+        if matches:
+            print(f"Found {len(matches)} S3 image URL(s) in markdown for article: {title[:50]}...")
+            for m in matches:
+                original_url = m.group(1)
+                full_tail = m.group(2)  # key plus optional query
+                # Strip query params from key
+                key = full_tail.split('?', 1)[0]
+                if original_url in s3_url_mapping:
+                    continue
+                # Compute expected local target; if exists, reuse without re-downloading
+                abs_path, rel_path = compute_local_image_paths(key, out_dir)
+                if os.path.exists(abs_path):
+                    s3_url_mapping[original_url] = rel_path
+                    print(f"  Exists locally, reuse: {rel_path}")
+                    continue
+                print(f"  Downloading: {key}")
+                image_data = download_s3_image_via_lambda(key)
+                if image_data:
+                    saved_rel = save_image_locally(image_data, key, out_dir)
+                    # Use ./ prefix to ensure previewers resolve relative path from the md file
+                    rel_final = saved_rel if saved_rel.startswith(('./', '/')) else f"./{saved_rel}"
+                    s3_url_mapping[original_url] = rel_final
+                    print(f"    Saved to: {saved_rel}")
+                else:
+                    # Keep original URL on failure
+                    s3_url_mapping[original_url] = original_url
+                    print(f"    Failed to download, keeping original URL")
+
+        # Replace S3 URLs in parsed content with local paths
+        if s3_url_mapping:
+            for original_url, local_path in s3_url_mapping.items():
+                parsed_content = parsed_content.replace(original_url, local_path)
+            
+            # Convert any markdown links to images when they point to image files,
+            # but avoid already-image syntax using negative lookbehind for '!'
+            # e.g., [alt](./images/foo.png) => ![](./images/foo.png)
+            link_to_image_pattern = re.compile(
+                r"(?<!!)\[[^\]]*\]\(((?:\.\/?images\/)[^)]+\.(?:png|jpg|jpeg|gif|webp|svg))\)",
+                re.IGNORECASE,
+            )
+            parsed_content = link_to_image_pattern.sub(r"![](\1)", parsed_content)
     
     # Generate Markdown content
     md_content = []
@@ -712,7 +896,7 @@ def convert_json_to_markdown(input_path="raw.json", out_dir="md_export"):
             filename = f"{date_prefix}-{slug}.md"
             
             # Generate article Markdown
-            article_md = generate_article_markdown(article)
+            article_md = generate_article_markdown(article, out_dir)
             
             # Check if content has changed for existing articles
             content_changed = True
@@ -790,7 +974,7 @@ def convert_json_to_markdown(input_path="raw.json", out_dir="md_export"):
                     if not is_new:
                         # Check if content changed
                         existing_content = get_existing_article_content(out_dir, article_id)
-                        article_md = generate_article_markdown(article)
+                        article_md = generate_article_markdown(article, out_dir)
                         content_changed = existing_content != article_md
                         
                         if content_changed:
